@@ -38,6 +38,7 @@ const EL_STATUS_TEXT    = 'statusText';
 const EL_COUNTDOWN      = 'countdown';
 const EL_SCAN_BTN       = 'scanBtn';
 const EL_AUTO_BTN       = 'autoToggleBtn';
+const EL_ENV_SELECT     = 'envSelect';
 const EL_TIMEOUT_INPUT  = 'timeout';
 const EL_FILTER_INPUT   = 'filterInput';
 const EL_SORT_SELECT    = 'sortSelect';
@@ -95,6 +96,7 @@ async function startScan() {
 
   const btn     = document.getElementById(EL_SCAN_BTN);
   const timeout = parseFloat(document.getElementById(EL_TIMEOUT_INPUT).value) || DEFAULT_SCAN_TIMEOUT_S;
+  const env     = document.getElementById(EL_ENV_SELECT).value;
 
   btn.disabled = true;
   btn.classList.add(CLASS_SCANNING);
@@ -103,7 +105,7 @@ async function startScan() {
   setStatus('busy', `Scanning for ${timeout}s — please wait…`);
 
   try {
-    const res = await fetch(`${API_DEVICES_PATH}?timeout=${timeout}`);
+    const res = await fetch(`${API_DEVICES_PATH}?timeout=${timeout}&environment=${env}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `HTTP ${res.status}`);
