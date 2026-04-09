@@ -1,80 +1,56 @@
 # Radar
 
-Radar is a BLE (Bluetooth Low Energy) device scanner with a REST API. It discovers nearby Bluetooth devices and exposes rich metadata — including estimated distance, signal quality, device profiles, and vendor identification.
+BLE device scanner with a Flask REST API. A background job continuously scans for nearby Bluetooth devices, persists readings to SQLite, and purges data older than 2 minutes. The API returns one entry per distinct device, enriched with motion analysis derived from the full scan history.
 
-## Project Structure
+## Setup
 
-```
-Radar/
-├── server/          # Flask API server
-│   ├── app/
-│   │   ├── api/
-│   │   │   └── routes.py       # REST endpoints
-│   │   └── bluetooth/
-│   │       └── scanner.py      # BLE scanning logic (bleak)
-│   ├── requirements.txt
-│   └── run.py
-└── README.md
-```
-
-## Server Setup
-
-### Prerequisites
-
-- Python 3.12+
-- A system with a Bluetooth adapter (`hci0` or similar)
-- Linux with BlueZ installed (`bluez` package)
-
-### Install dependencies
+**Prerequisites:** Python 3.12+, Linux with BlueZ, Bluetooth adapter.
 
 ```bash
 cd server
 python -m venv venv
-source venv/bin/activate
 pip install -r requirements.txt
-```
-
-### Run the server
-
-BLE scanning requires elevated privileges:
-
-```bash
+cp .env.example .env        # edit as needed
+FLASK_APP=run.py venv/bin/flask db upgrade
 sudo venv/bin/python run.py
 ```
 
-Alternatively, grant the capability once to avoid using `sudo` every time:
-
+Or avoid `sudo` permanently:
 ```bash
-sudo setcap cap_net_raw+eip venv/bin/python3.12
+sudo setcap cap_net_raw,cap_net_admin+eip venv/bin/python3.12
 venv/bin/python run.py
 ```
 
-The server starts on `http://0.0.0.0:5000` by default.
+## Configuration
+
+All constants live in `server/.env` (see `.env.example`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLASK_ENV` | `development` | `development` or `production` |
+| `FLASK_HOST` | `0.0.0.0` | Bind address |
+| `FLASK_PORT` | `5000` | Port |
+| `DATABASE_URL` | `sqlite:///radar.db` | SQLAlchemy DB URL |
+| `BLE_SCAN_TIMEOUT` | `10.0` | Seconds per scan pass |
+| `BLE_SCAN_INTERVAL_SECONDS` | `15` | Seconds between scan jobs |
+| `BLE_RETENTION_SECONDS` | `120` | Data retention window |
+| `PURGE_INTERVAL_SECONDS` | `30` | How often the purge job runs |
+| `BLE_DEFAULT_TX_POWER` | `-59` | Fallback TX power (dBm) |
+| `BLE_PATH_LOSS_N` | `2.0` | Path-loss exponent |
 
 ## API
 
 ### `GET /api/devices`
 
-Scans for nearby BLE devices and returns a list with metadata.
-
-**Query parameters:**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `timeout` | `5.0`   | Scan duration in seconds |
-
-**Example:**
+Returns one entry per distinct device seen within the last 2 minutes.
 
 ```bash
 curl http://localhost:5000/api/devices
-curl "http://localhost:5000/api/devices?timeout=10"
 ```
-
-**Response:**
 
 ```json
 {
-  "count": 2,
+  "count": 1,
   "devices": [
     {
       "address": "AA:BB:CC:DD:EE:FF",
@@ -91,28 +67,94 @@ curl "http://localhost:5000/api/devices?timeout=10"
       "device_profiles": ["Audio Sink"],
       "service_uuids": ["0000110b-0000-1000-8000-00805f9b34fb"],
       "manufacturer_data": {},
-      "service_data": {}
+      "service_data": {},
+      "last_seen": "2026-04-09T10:00:00+00:00",
+      "analysis": {
+        "smoothed_distance_m": 3.21,
+        "speed_m_s": 0.04,
+        "trend": "stationary",
+        "datapoints": [
+          {
+            "timestamp": "2026-04-09T09:59:00+00:00",
+            "rssi": -68,
+            "raw_distance_m": 3.98,
+            "smoothed_distance_m": 3.45
+          },
+          {
+            "timestamp": "2026-04-09T10:00:00+00:00",
+            "rssi": -65,
+            "raw_distance_m": 3.16,
+            "smoothed_distance_m": 3.21
+          }
+        ]
+      }
     }
   ]
 }
 ```
 
-**Device fields:**
+**`analysis` fields:**
 
 | Field | Description |
-|-------|-------------|
-| `address` | Bluetooth MAC address |
-| `name` | Advertised device name (`"Unknown"` if not present) |
-| `rssi` | Received signal strength in dBm |
-| `tx_power` | Advertised TX power in dBm (`null` if not present) |
-| `estimated_distance_m` | Estimated distance in metres (log-distance path-loss model) |
-| `signal_quality_pct` | Signal quality 0–100% (mapped from RSSI -100 to -30 dBm) |
-| `path_loss_db` | Path loss in dB (`tx_power - rssi`), `null` if TX power unavailable |
-| `address_type` | `"random"` or `"public"` (derived from MAC address) |
-| `is_apple` | `true` if manufacturer data contains Apple's company ID (`0x004C`) |
-| `is_microsoft` | `true` if manufacturer data contains Microsoft's company ID (`0x0006`) |
-| `known_companies` | List of recognized vendor names from manufacturer data |
-| `device_profiles` | List of BLE profiles inferred from service UUIDs (e.g. `"Heart Rate"`, `"HID"`) |
-| `service_uuids` | Raw list of advertised service UUIDs |
-| `manufacturer_data` | Raw manufacturer data keyed by company ID |
-| `service_data` | Raw service data keyed by UUID |
+|---|---|
+| `smoothed_distance_m` | Kalman-filtered distance of the latest scan (metres) |
+| `speed_m_s` | Median speed across scan pairs (m/s) |
+| `trend` | `approaching` / `receding` / `stationary` |
+| `datapoints` | Array of per-scan records: `timestamp`, `rssi`, `raw_distance_m`, `smoothed_distance_m` |
+
+## Motion Analysis Algorithm
+
+Raw RSSI is highly noisy (multipath, reflections, device orientation). The pipeline:
+
+### 1. Kalman Filter (RSSI smoothing)
+
+A 1D Kalman filter models RSSI as a slowly drifting state corrupted by measurement noise:
+
+```
+# Predict
+p_pred = p + Q
+
+# Update
+K      = p_pred / (p_pred + R)     ← Kalman gain
+x      = x + K × (z − x)           ← fuse measurement z into estimate x
+p      = (1 − K) × p_pred
+```
+
+- **Q = 2.0 dBm²** — process noise: how much true RSSI drifts between scans  
+- **R = 9.0 dBm²** — measurement noise: ±3 dBm sensor uncertainty  
+
+The Kalman gain K auto-balances trust between the model and the measurement. High K → trust the measurement; low K → trust the prior estimate.
+
+### 2. Distance (log-distance path-loss model)
+
+```
+d = 10 ^ ((TX_power − RSSI_smoothed) / (10 × n))
+```
+
+- `TX_power`: advertised by device, or `BLE_DEFAULT_TX_POWER` (-59 dBm)  
+- `n`: `BLE_PATH_LOSS_N` (2.0 = free space; 2–3 typical indoors)
+
+### 3. Speed (median of Δd/Δt)
+
+Speed is computed between every consecutive scan pair and the **median** is taken:
+
+```
+speeds = [ |d[i] − d[i−1]| / (t[i] − t[i−1])  for each consecutive pair ]
+speed  = median(speeds)
+```
+
+Median is used over mean because a single outlier scan (e.g. the device briefly turning) would skew an average but cannot affect the median.
+
+### 4. Trend (linear regression slope)
+
+OLS slope of smoothed distances over timestamps across all datapoints:
+
+```
+slope = Σ (tᵢ − t̄)(dᵢ − d̄) / Σ (tᵢ − t̄)²
+```
+
+- `slope > 0.05 m/s` → **receding**  
+- `slope < −0.05 m/s` → **approaching**  
+- otherwise → **stationary**
+
+Using the full history via regression is more stable than comparing window halves, since it uses all available evidence and naturally handles uneven scan intervals.

@@ -1,12 +1,13 @@
 import asyncio
+import os
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
 # Assumed TX power at 1 metre when device doesn't advertise one (dBm)
-_DEFAULT_TX_POWER = -59
+_DEFAULT_TX_POWER = int(os.getenv("BLE_DEFAULT_TX_POWER", -59))
 # Path-loss exponent: 2.0 = free space, 2–3 typical indoors
-_PATH_LOSS_N = 2.0
+_PATH_LOSS_N = float(os.getenv("BLE_PATH_LOSS_N", 2.0))
 
 _COMPANY_IDS = {
     0x004C: "Apple",
