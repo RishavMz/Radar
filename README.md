@@ -1,17 +1,22 @@
 # Radar
 
-Radar is a BLE (Bluetooth Low Energy) device scanner with a REST API. It discovers nearby Bluetooth devices and exposes rich metadata — including estimated distance, signal quality, device profiles, and vendor identification.
+Radar is a BLE (Bluetooth Low Energy) device scanner with a REST API and a built-in web dashboard. It discovers nearby Bluetooth devices and exposes rich metadata — including estimated distance, signal quality, device profiles, and vendor identification. The dashboard auto-polls every 10 seconds and visualises per-device RSSI and speed history with SVG sparklines.
 
 ## Project Structure
 
 ```
 Radar/
-├── server/          # Flask API server
+├── server/                        # Flask server — API + frontend
 │   ├── app/
 │   │   ├── api/
-│   │   │   └── routes.py       # REST endpoints
-│   │   └── bluetooth/
-│   │       └── scanner.py      # BLE scanning logic (bleak)
+│   │   │   └── routes.py          # REST endpoints (/api/devices)
+│   │   ├── bluetooth/
+│   │   │   └── scanner.py         # BLE scanning logic (bleak)
+│   │   ├── static/
+│   │   │   ├── css/styles.css     # Dashboard styles
+│   │   │   └── scripts/app.js     # Dashboard logic
+│   │   └── templates/
+│   │       └── index.html         # Dashboard page
 │   ├── requirements.txt
 │   └── run.py
 └── README.md
@@ -50,6 +55,8 @@ venv/bin/python run.py
 ```
 
 The server starts on `http://0.0.0.0:5000` by default.
+
+Open **http://localhost:5000** in a browser to access the dashboard.
 
 ## API
 
