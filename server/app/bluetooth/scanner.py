@@ -12,8 +12,8 @@ _DEFAULT_TX_POWER = -59
 _PATH_LOSS_N = 2.0
 
 # Per-device history
-_MAX_HISTORY   = 30   # data points retained per device
-_STATUS_WINDOW = 4    # most-recent speed samples used for status classification
+_MAX_HISTORY      = 30    # data points retained per device
+_STATUS_WINDOW    = 4     # most-recent speed samples used for status classification
 
 # Speed thresholds (m/s); positive = moving away, negative = getting closer
 _SPEED_STATIONARY = 0.03
@@ -28,7 +28,6 @@ _COMPANY_IDS = {
     0x01D5: "Fitbit",
 }
 
-# Maps service UUID (lowercase, no braces) -> human-readable profile name
 _SERVICE_PROFILES = {
     "0000180d-0000-1000-8000-00805f9b34fb": "Heart Rate",
     "0000180f-0000-1000-8000-00805f9b34fb": "Battery",
@@ -50,13 +49,18 @@ _SERVICE_PROFILES = {
     "00001111-0000-1000-8000-00805f9b34fb": "Audio/Video Remote Control",
 }
 
-# ── In-memory history ─────────────────────────────────────────────────────────
+# ── Device store ──────────────────────────────────────────────────────────────
 
-# address -> [{"time": float, "rssi": int, "distance": float | None}]
-_history: dict[str, list[dict]] = {}
+# Persists across scans. Stale devices are retained and returned with active=False.
+# address -> {
+#   "snapshot": dict,           last known device fields
+#   "history":  list[dict],     [{time, rssi, distance}, ...]
+#   "last_seen": float,         unix timestamp
+# }
+_device_store: dict[str, dict] = {}
 
 
-# ── Signal / distance helpers ─────────────────────────────────────────────────
+# ── Signal / metadata helpers ─────────────────────────────────────────────────
 
 def _estimate_distance(rssi: int, tx_power: int | None) -> float | None:
     if rssi >= 0:
@@ -66,15 +70,12 @@ def _estimate_distance(rssi: int, tx_power: int | None) -> float | None:
 
 
 def _signal_quality(rssi: int) -> int:
-    """Map RSSI (dBm) to 0–100% quality."""
     clamped = max(-100, min(-30, rssi))
     return round((clamped + 100) / 70 * 100)
 
 
 def _path_loss(rssi: int, tx_power: int | None) -> int | None:
-    if tx_power is None:
-        return None
-    return tx_power - rssi
+    return (tx_power - rssi) if tx_power is not None else None
 
 
 def _address_type(address: str) -> str:
@@ -83,12 +84,10 @@ def _address_type(address: str) -> str:
 
 
 def _manufacturer_info(manufacturer_data: dict[int, bytes]) -> dict:
-    companies = [
-        name for cid, name in _COMPANY_IDS.items() if cid in manufacturer_data
-    ]
+    companies = [name for cid, name in _COMPANY_IDS.items() if cid in manufacturer_data]
     return {
-        "is_apple":       0x004C in manufacturer_data,
-        "is_microsoft":   0x0006 in manufacturer_data,
+        "is_apple":        0x004C in manufacturer_data,
+        "is_microsoft":    0x0006 in manufacturer_data,
         "known_companies": companies,
     }
 
@@ -101,12 +100,15 @@ def _device_profiles(service_uuids: list[str]) -> list[str]:
     ]
 
 
-# ── History & movement ────────────────────────────────────────────────────────
+# ── Store management ──────────────────────────────────────────────────────────
 
-def _push_history(address: str, ts: float, rssi: int, distance: float | None) -> list[dict]:
-    if address not in _history:
-        _history[address] = []
-    hist = _history[address]
+def _update_store(address: str, snapshot: dict, ts: float, rssi: int, distance: float | None) -> list[dict]:
+    if address not in _device_store:
+        _device_store[address] = {"snapshot": {}, "history": [], "last_seen": 0.0}
+    entry = _device_store[address]
+    entry["snapshot"]  = snapshot
+    entry["last_seen"] = ts
+    hist = entry["history"]
     hist.append({"time": ts, "rssi": rssi, "distance": distance})
     if len(hist) > _MAX_HISTORY:
         hist.pop(0)
@@ -114,7 +116,6 @@ def _push_history(address: str, ts: float, rssi: int, distance: float | None) ->
 
 
 def _compute_speeds(history: list[dict]) -> list[float | None]:
-    """Return one speed (m/s) per consecutive pair; None when distance unavailable."""
     speeds: list[float | None] = []
     for i in range(1, len(history)):
         prev, curr = history[i - 1], history[i]
@@ -127,32 +128,31 @@ def _compute_speeds(history: list[dict]) -> list[float | None]:
 
 
 def _movement_status(speeds: list[float | None]) -> dict:
-    """Classify movement based on recent average speed."""
     valid = [s for s in speeds if s is not None]
     if not valid:
         return {"label": "Tracking\u2026", "cls": "tracking"}
 
     avg = sum(valid[-_STATUS_WINDOW:]) / min(len(valid), _STATUS_WINDOW)
 
-    if abs(avg) < _SPEED_STATIONARY: return {"label": "Stationary",       "cls": "stable"}
-    if avg < -_SPEED_FAST:           return {"label": "Approaching fast",  "cls": "closer"}
-    if avg < 0:                      return {"label": "Getting closer",    "cls": "closer"}
-    if avg > _SPEED_FAST:            return {"label": "Moving away fast",  "cls": "away"}
-    return                                  {"label": "Moving away",       "cls": "away"}
+    if abs(avg) < _SPEED_STATIONARY: return {"label": "Stationary",      "cls": "stable"}
+    if avg < -_SPEED_FAST:           return {"label": "Approaching fast", "cls": "closer"}
+    if avg < 0:                      return {"label": "Getting closer",   "cls": "closer"}
+    if avg > _SPEED_FAST:            return {"label": "Moving away fast", "cls": "away"}
+    return                                  {"label": "Moving away",      "cls": "away"}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_bluetooth_devices(timeout: float = 5.0) -> list[dict]:
-    """Scan for nearby BLE devices using BlueZ via bleak."""
+    """Scan for nearby BLE devices and return all known devices (active + stale)."""
     return asyncio.run(_scan(timeout))
 
 
 async def _scan(timeout: float) -> list[dict]:
-    devices: dict[str, dict] = {}
+    active_addresses: set[str] = set()
 
     def callback(device: BLEDevice, adv: AdvertisementData):
-        if device.address in devices:
+        if device.address in active_addresses:
             return
 
         ts       = time.time()
@@ -160,37 +160,56 @@ async def _scan(timeout: float) -> list[dict]:
         profiles = _device_profiles(adv.service_uuids)
         distance = _estimate_distance(adv.rssi, adv.tx_power)
 
-        hist   = _push_history(device.address, ts, adv.rssi, distance)
-        speeds = _compute_speeds(hist)
-        status = _movement_status(speeds)
-
-        devices[device.address] = {
+        snapshot = {
             "address":              device.address,
             "name":                 device.name or adv.local_name or "Unknown",
             "rssi":                 adv.rssi,
             "tx_power":             adv.tx_power,
-            # Derived signal fields
             "estimated_distance_m": distance,
             "signal_quality_pct":   _signal_quality(adv.rssi),
             "path_loss_db":         _path_loss(adv.rssi, adv.tx_power),
             "address_type":         _address_type(device.address),
-            # Vendor / profile
             "is_apple":             mfr_info["is_apple"],
             "is_microsoft":         mfr_info["is_microsoft"],
             "known_companies":      mfr_info["known_companies"],
             "device_profiles":      profiles,
-            # Movement (computed server-side from history)
-            "rssi_history":         [h["rssi"] for h in hist],
-            "speed_history":        speeds,
-            "movement_label":       status["label"],
-            "movement_cls":         status["cls"],
-            # Raw advertisement data
-            "service_uuids":        adv.service_uuids,
+            "service_uuids":        list(adv.service_uuids),
             "manufacturer_data":    {f"0x{k:04X}": v.hex() for k, v in adv.manufacturer_data.items()},
             "service_data":         {str(k): v.hex() for k, v in adv.service_data.items()},
         }
 
-    async with BleakScanner(callback) as scanner:
+        active_addresses.add(device.address)
+        _update_store(device.address, snapshot, ts, adv.rssi, distance)
+
+    async with BleakScanner(callback):
         await asyncio.sleep(timeout)
 
-    return list(devices.values())
+    scan_time = time.time()
+    result = []
+
+    for address, entry in _device_store.items():
+        hist   = entry["history"]
+        speeds = _compute_speeds(hist)
+        status = _movement_status(speeds)
+
+        # Express history times relative to the most recent reading (t=0 = now)
+        latest = hist[-1]["time"] if hist else scan_time
+        history_rel = [
+            {
+                "t":        round(h["time"] - latest, 1),
+                "rssi":     h["rssi"],
+                "distance": h["distance"],
+            }
+            for h in hist
+        ]
+
+        result.append({
+            **entry["snapshot"],
+            "active":       address in active_addresses,
+            "last_seen_s":  round(scan_time - entry["last_seen"], 1),
+            "history":      history_rel,
+            "movement_label": status["label"],
+            "movement_cls":   status["cls"],
+        })
+
+    return result
