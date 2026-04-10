@@ -31,6 +31,7 @@ const COLOR_STABLE      = '#d29922';
 
 // API
 const API_DEVICES_PATH  = '/api/devices';
+const API_RESET_PATH    = '/api/reset';
 
 // Element IDs
 const EL_STATUS_BAR     = 'statusBar';
@@ -43,6 +44,7 @@ const EL_TIMEOUT_INPUT  = 'timeout';
 const EL_FILTER_INPUT   = 'filterInput';
 const EL_SORT_SELECT    = 'sortSelect';
 const EL_GRID           = 'grid';
+const EL_CLEAR_BTN      = 'clearBtn';
 
 // Button / UI labels
 const LABEL_SCAN_IDLE   = 'Scan';
@@ -125,6 +127,15 @@ async function startScan() {
     btn.textContent = LABEL_SCAN_IDLE;
     if (pollTimer !== null) startCountdown();
   }
+}
+
+// ── Clear data ────────────────────────────────────────────────────────────────
+
+async function clearData() {
+  await fetch(API_RESET_PATH, { method: 'POST' });
+  allDevices = [];
+  renderCards();
+  setStatus('', 'Data cleared \u2014 press Scan to start fresh.');
 }
 
 // ── Auto-poll ─────────────────────────────────────────────────────────────────

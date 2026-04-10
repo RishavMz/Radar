@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from ..bluetooth.scanner import get_bluetooth_devices
+from ..bluetooth.scanner import get_bluetooth_devices, reset_store
 
 api_bp = Blueprint("api", __name__)
 
@@ -13,3 +13,9 @@ def list_devices():
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 503
     return jsonify({"devices": devices, "count": len(devices)})
+
+
+@api_bp.post("/reset")
+def reset_devices():
+    reset_store()
+    return jsonify({"ok": True})
