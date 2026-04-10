@@ -159,6 +159,11 @@ def _movement_status(speeds: list[float | None]) -> dict:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def reset_store() -> None:
+    """Clear all persisted device history."""
+    _device_store.clear()
+
+
 def get_bluetooth_devices(timeout: float = 5.0, environment: str = _DEFAULT_ENVIRONMENT) -> list[dict]:
     """Scan for nearby BLE devices and return all known devices (active + stale)."""
     env = _ENVIRONMENTS.get(environment, _ENVIRONMENTS[_DEFAULT_ENVIRONMENT])

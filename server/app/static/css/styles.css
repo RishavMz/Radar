@@ -98,6 +98,14 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border-color: var(--green);
 }
 
+#clearBtn {
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--red);
+}
+
+#clearBtn:hover:not(:disabled) { background: #2d1a1a; }
+
 /* ── Status bar ── */
 #statusBar {
   padding: .5rem 2rem;
