@@ -18,6 +18,7 @@ Radar/
 │   │   └── templates/
 │   │       └── index.html         # Dashboard page
 │   ├── requirements.txt
+│   ├── .env.example
 │   └── run.py
 └── README.md
 ```
@@ -38,6 +39,14 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+### Configure environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` if you need to change the host, port, or database path. The defaults work out of the box.
 
 ### Run the server
 
