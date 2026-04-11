@@ -1,241 +1,204 @@
+"""
+Bluetooth Low Energy scanner.
+
+Extends BaseScanner with BLE-specific logic:
+- Async scanning via bleak (BleakScanner callback model)
+- Manufacturer data parsing and service profile identification
+- ORM persistence to bluetooth_devices / bluetooth_history tables
+"""
+
 import asyncio
 import time
+
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
+from sqlalchemy import delete, select
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+from app.core.scanner import BaseScanner
+from app.core.store import MAX_HISTORY
+from app.models.base import db
+from app.models.bluetooth import BluetoothDevice, BluetoothHistory
 
-# Assumed TX power at 1 metre when device doesn't advertise one (dBm)
+from .metadata import address_type, device_profiles, manufacturer_info, path_loss
+
+# Fallback reference RSSI at 1 m when device doesn't advertise TX power (dBm).
 _DEFAULT_TX_POWER = -59
 
-# Per-device history
-_MAX_HISTORY      = 30  # data points retained per device
-_STATUS_WINDOW    = 4   # most-recent speed samples used for status classification
-_RSSI_SMOOTH_WIN  = 5   # readings averaged for smoothed RSSI / distance
-
-# Speed thresholds (m/s); positive = moving away, negative = getting closer
+# Speed thresholds for movement classification (m/s).
 _SPEED_STATIONARY = 0.03
-_SPEED_FAST       = 0.15
-
-# Environment profiles: path-loss exponent n for log-distance model.
-# Higher n = signal falls off faster = larger distance estimates (realistic indoors).
-_ENVIRONMENTS: dict[str, dict] = {
-    "outdoor":      {"n": 2.0, "label": "Outdoor"},
-    "indoor_open":  {"n": 2.5, "label": "Indoor \u2013 Open"},
-    "indoor_mixed": {"n": 3.0, "label": "Indoor \u2013 Mixed"},
-    "indoor_dense": {"n": 3.5, "label": "Indoor \u2013 Dense"},
-}
-_DEFAULT_ENVIRONMENT = "indoor_mixed"
-
-_COMPANY_IDS = {
-    0x004C: "Apple",
-    0x0006: "Microsoft",
-    0x0075: "Samsung",
-    0x00E0: "Google",
-    0x0157: "Garmin",
-    0x01D5: "Fitbit",
-}
-
-_SERVICE_PROFILES = {
-    "0000180d-0000-1000-8000-00805f9b34fb": "Heart Rate",
-    "0000180f-0000-1000-8000-00805f9b34fb": "Battery",
-    "00001812-0000-1000-8000-00805f9b34fb": "HID",
-    "0000110b-0000-1000-8000-00805f9b34fb": "Audio Sink",
-    "0000110a-0000-1000-8000-00805f9b34fb": "Audio Source",
-    "00001800-0000-1000-8000-00805f9b34fb": "Generic Access",
-    "00001801-0000-1000-8000-00805f9b34fb": "Generic Attribute",
-    "00001804-0000-1000-8000-00805f9b34fb": "TX Power",
-    "00001805-0000-1000-8000-00805f9b34fb": "Current Time",
-    "00001816-0000-1000-8000-00805f9b34fb": "Cycling Speed and Cadence",
-    "00001818-0000-1000-8000-00805f9b34fb": "Cycling Power",
-    "00001819-0000-1000-8000-00805f9b34fb": "Location and Navigation",
-    "0000181c-0000-1000-8000-00805f9b34fb": "User Data",
-    "0000181d-0000-1000-8000-00805f9b34fb": "Weight Scale",
-    "0000180a-0000-1000-8000-00805f9b34fb": "Device Information",
-    "00001802-0000-1000-8000-00805f9b34fb": "Immediate Alert",
-    "00001803-0000-1000-8000-00805f9b34fb": "Link Loss",
-    "00001111-0000-1000-8000-00805f9b34fb": "Audio/Video Remote Control",
-}
-
-# ── Device store ──────────────────────────────────────────────────────────────
-
-# Persists across scans. Stale devices are retained and returned with active=False.
-# address -> {
-#   "snapshot":  dict,         last known device fields
-#   "history":   list[dict],   [{time, rssi, distance_raw}, ...]
-#   "last_seen": float,        unix timestamp
-# }
-_device_store: dict[str, dict] = {}
+_SPEED_FAST = 0.15
 
 
-# ── Signal / metadata helpers ─────────────────────────────────────────────────
+class BluetoothScanner(BaseScanner):
+    """BLE scanner: bleak-based discovery + ORM persistence."""
 
-def _estimate_distance(rssi: int, tx_power: int | None, n: float) -> float | None:
-    """Log-distance path-loss model. n=2.0 free space, higher indoors."""
-    if rssi >= 0:
-        return None
-    ref = tx_power if tx_power is not None else _DEFAULT_TX_POWER
-    return round(10 ** ((ref - rssi) / (10 * n)), 2)
+    def __init__(self) -> None:
+        super().__init__(speed_stationary=_SPEED_STATIONARY, speed_fast=_SPEED_FAST)
 
+    # ── BaseScanner interface ─────────────────────────────────────────────────
 
-def _signal_quality(rssi: int) -> int:
-    clamped = max(-100, min(-30, rssi))
-    return round((clamped + 100) / 70 * 100)
+    def _ref_rssi(self, snapshot: dict) -> float:
+        return snapshot.get("tx_power") or _DEFAULT_TX_POWER
 
+    def _do_scan(
+        self, timeout: float, n: float
+    ) -> tuple[list[tuple], set[str], float]:
+        readings: list[tuple] = []
+        active: set[str] = set()
 
-def _path_loss(rssi: int, tx_power: int | None) -> int | None:
-    return (tx_power - rssi) if tx_power is not None else None
+        def callback(device: BLEDevice, adv: AdvertisementData) -> None:
+            if device.address in active:
+                return  # de-duplicate within one scan window
 
+            ts = time.time()
+            mfr = manufacturer_info(adv.manufacturer_data)
+            profiles = device_profiles(adv.service_uuids)
+            ref = adv.tx_power or _DEFAULT_TX_POWER
+            # Distance at callback time uses the raw RSSI — smoothing happens in _build_results.
+            dist = 10 ** ((ref - adv.rssi) / (10 * n)) if adv.rssi < 0 else None
+            if dist is not None:
+                dist = round(dist, 2)
 
-def _address_type(address: str) -> str:
-    first_byte = int(address.split(":")[0], 16)
-    return "random" if first_byte >= 0xC0 else "public"
+            snapshot = {
+                "address":           device.address,
+                "name":              device.name or adv.local_name or "Unknown",
+                "rssi":              adv.rssi,
+                "tx_power":          adv.tx_power,
+                "address_type":      address_type(device.address),
+                "is_apple":          mfr["is_apple"],
+                "is_microsoft":      mfr["is_microsoft"],
+                "known_companies":   mfr["known_companies"],
+                "device_profiles":   profiles,
+                "path_loss_db":      path_loss(adv.rssi, adv.tx_power),
+                "service_uuids":     list(adv.service_uuids),
+                "manufacturer_data": {f"0x{k:04X}": v.hex() for k, v in adv.manufacturer_data.items()},
+                "service_data":      {str(k): v.hex() for k, v in adv.service_data.items()},
+            }
 
+            active.add(device.address)
+            readings.append((device.address, snapshot, adv.rssi, dist, ts))
 
-def _manufacturer_info(manufacturer_data: dict[int, bytes]) -> dict:
-    companies = [name for cid, name in _COMPANY_IDS.items() if cid in manufacturer_data]
-    return {
-        "is_apple":        0x004C in manufacturer_data,
-        "is_microsoft":    0x0006 in manufacturer_data,
-        "known_companies": companies,
-    }
+        asyncio.run(self._async_scan(timeout, callback))
+        return readings, active, time.time()
 
+    def _init_store(self) -> None:
+        """Load all persisted BLE devices and their history into the in-memory store."""
+        try:
+            devices = db.session.execute(db.select(BluetoothDevice)).scalars().all()
+            for dev in devices:
+                rows = (
+                    db.session.execute(
+                        db.select(BluetoothHistory)
+                        .where(BluetoothHistory.address == dev.address)
+                        .order_by(BluetoothHistory.recorded_at.asc())
+                        .limit(MAX_HISTORY)
+                    )
+                    .scalars().all()
+                )
+                self._store.seed(
+                    key=dev.address,
+                    snapshot={
+                        "address":           dev.address,
+                        "name":              dev.name,
+                        "rssi":              rows[-1].rssi if rows else -100,
+                        "tx_power":          dev.tx_power,
+                        "address_type":      dev.address_type,
+                        "is_apple":          dev.is_apple,
+                        "is_microsoft":      dev.is_microsoft,
+                        "known_companies":   dev.known_companies or [],
+                        "device_profiles":   dev.device_profiles or [],
+                        "path_loss_db":      None,
+                        "service_uuids":     dev.service_uuids or [],
+                        "manufacturer_data": dev.manufacturer_data or {},
+                        "service_data":      dev.service_data or {},
+                    },
+                    history=[
+                        {"time": r.recorded_at, "rssi": r.rssi, "distance": r.distance}
+                        for r in rows
+                    ],
+                    last_seen=dev.last_seen_at or 0.0,
+                )
+        except Exception:
+            pass  # DB not ready — start with empty store
 
-def _device_profiles(service_uuids: list[str]) -> list[str]:
-    return [
-        profile
-        for uuid in service_uuids
-        if (profile := _SERVICE_PROFILES.get(uuid.lower()))
-    ]
+    def _persist_reading(
+        self,
+        key: str,
+        snapshot: dict,
+        rssi: float,
+        distance: float | None,
+        ts: float,
+    ) -> None:
+        """Upsert the BLE device row and insert one history entry (no commit)."""
+        try:
+            existing = db.session.get(BluetoothDevice, key)
+            if existing is None:
+                db.session.add(BluetoothDevice(
+                    address=key,
+                    name=snapshot["name"],
+                    tx_power=snapshot.get("tx_power"),
+                    address_type=snapshot["address_type"],
+                    is_apple=snapshot["is_apple"],
+                    is_microsoft=snapshot["is_microsoft"],
+                    known_companies=snapshot["known_companies"],
+                    device_profiles=snapshot["device_profiles"],
+                    service_uuids=snapshot["service_uuids"],
+                    manufacturer_data=snapshot["manufacturer_data"],
+                    service_data=snapshot["service_data"],
+                    last_seen_at=ts,
+                    created_at=ts,
+                ))
+            else:
+                existing.name = snapshot["name"]
+                existing.tx_power = snapshot.get("tx_power")
+                existing.address_type = snapshot["address_type"]
+                existing.is_apple = snapshot["is_apple"]
+                existing.is_microsoft = snapshot["is_microsoft"]
+                existing.known_companies = snapshot["known_companies"]
+                existing.device_profiles = snapshot["device_profiles"]
+                existing.service_uuids = snapshot["service_uuids"]
+                existing.manufacturer_data = snapshot["manufacturer_data"]
+                existing.service_data = snapshot["service_data"]
+                existing.last_seen_at = ts
 
+            history_row = BluetoothHistory(address=key, rssi=rssi, distance=distance, recorded_at=ts)
+            db.session.add(history_row)
+            db.session.flush()  # assign ID before trim query
 
-def _smooth_rssi(history: list[dict]) -> int:
-    """Average of the last _RSSI_SMOOTH_WIN raw RSSI readings."""
-    recent = [h["rssi"] for h in history[-_RSSI_SMOOTH_WIN:]]
-    return round(sum(recent) / len(recent))
+            self._trim_history(key)
+        except Exception:
+            pass  # non-fatal; in-memory store is authoritative
 
+    def _clear_db(self) -> None:
+        """Delete all BLE records and commit."""
+        try:
+            db.session.execute(delete(BluetoothHistory))
+            db.session.execute(delete(BluetoothDevice))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
 
-# ── Store management ──────────────────────────────────────────────────────────
+    # ── Internal helpers ──────────────────────────────────────────────────────
 
-def _update_store(address: str, snapshot: dict, ts: float, rssi: int, distance_raw: float | None) -> list[dict]:
-    if address not in _device_store:
-        _device_store[address] = {"snapshot": {}, "history": [], "last_seen": 0.0}
-    entry = _device_store[address]
-    entry["snapshot"]  = snapshot
-    entry["last_seen"] = ts
-    hist = entry["history"]
-    hist.append({"time": ts, "rssi": rssi, "distance": distance_raw})
-    if len(hist) > _MAX_HISTORY:
-        hist.pop(0)
-    return hist
+    @staticmethod
+    async def _async_scan(timeout: float, callback) -> None:
+        async with BleakScanner(callback):
+            await asyncio.sleep(timeout)
 
-
-def _compute_speeds(history: list[dict]) -> list[float | None]:
-    speeds: list[float | None] = []
-    for i in range(1, len(history)):
-        prev, curr = history[i - 1], history[i]
-        if prev["distance"] is None or curr["distance"] is None:
-            speeds.append(None)
-            continue
-        dt = curr["time"] - prev["time"]
-        speeds.append((curr["distance"] - prev["distance"]) / dt if dt > 0 else None)
-    return speeds
-
-
-def _movement_status(speeds: list[float | None]) -> dict:
-    valid = [s for s in speeds if s is not None]
-    if not valid:
-        return {"label": "Tracking\u2026", "cls": "tracking"}
-
-    avg = sum(valid[-_STATUS_WINDOW:]) / min(len(valid), _STATUS_WINDOW)
-
-    if abs(avg) < _SPEED_STATIONARY: return {"label": "Stationary",      "cls": "stable"}
-    if avg < -_SPEED_FAST:           return {"label": "Approaching fast", "cls": "closer"}
-    if avg < 0:                      return {"label": "Getting closer",   "cls": "closer"}
-    if avg > _SPEED_FAST:            return {"label": "Moving away fast", "cls": "away"}
-    return                                  {"label": "Moving away",      "cls": "away"}
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
-
-def reset_store() -> None:
-    """Clear all persisted device history."""
-    _device_store.clear()
-
-
-def get_bluetooth_devices(timeout: float = 5.0, environment: str = _DEFAULT_ENVIRONMENT) -> list[dict]:
-    """Scan for nearby BLE devices and return all known devices (active + stale)."""
-    env = _ENVIRONMENTS.get(environment, _ENVIRONMENTS[_DEFAULT_ENVIRONMENT])
-    return asyncio.run(_scan(timeout, env))
-
-
-async def _scan(timeout: float, env: dict) -> list[dict]:
-    active_addresses: set[str] = set()
-    n = env["n"]
-
-    def callback(device: BLEDevice, adv: AdvertisementData):
-        if device.address in active_addresses:
-            return
-
-        ts       = time.time()
-        mfr_info = _manufacturer_info(adv.manufacturer_data)
-        profiles = _device_profiles(adv.service_uuids)
-
-        # Raw distance uses the current scan's RSSI (single reading, pre-smoothing)
-        distance_raw = _estimate_distance(adv.rssi, adv.tx_power, n)
-
-        snapshot = {
-            "address":              device.address,
-            "name":                 device.name or adv.local_name or "Unknown",
-            "rssi":                 adv.rssi,
-            "tx_power":             adv.tx_power,
-            "address_type":         _address_type(device.address),
-            "is_apple":             mfr_info["is_apple"],
-            "is_microsoft":         mfr_info["is_microsoft"],
-            "known_companies":      mfr_info["known_companies"],
-            "device_profiles":      profiles,
-            "path_loss_db":         _path_loss(adv.rssi, adv.tx_power),
-            "service_uuids":        list(adv.service_uuids),
-            "manufacturer_data":    {f"0x{k:04X}": v.hex() for k, v in adv.manufacturer_data.items()},
-            "service_data":         {str(k): v.hex() for k, v in adv.service_data.items()},
-        }
-
-        active_addresses.add(device.address)
-        _update_store(device.address, snapshot, ts, adv.rssi, distance_raw)
-
-    async with BleakScanner(callback):
-        await asyncio.sleep(timeout)
-
-    scan_time = time.time()
-    result = []
-
-    for address, entry in _device_store.items():
-        hist     = entry["history"]
-        snapshot = entry["snapshot"]
-        speeds   = _compute_speeds(hist)
-        status   = _movement_status(speeds)
-
-        # Smoothed RSSI and derived fields — reduces single-reading noise
-        rssi_smooth = _smooth_rssi(hist)
-        dist_smooth = _estimate_distance(rssi_smooth, snapshot.get("tx_power"), n)
-
-        latest = hist[-1]["time"] if hist else scan_time
-        history_rel = [
-            {"t": round(h["time"] - latest, 1), "rssi": h["rssi"], "distance": h["distance"]}
-            for h in hist
-        ]
-
-        result.append({
-            **snapshot,
-            "rssi":                 rssi_smooth,
-            "signal_quality_pct":   _signal_quality(rssi_smooth),
-            "estimated_distance_m": dist_smooth,
-            "active":               address in active_addresses,
-            "last_seen_s":          round(scan_time - entry["last_seen"], 1),
-            "history":              history_rel,
-            "movement_label":       status["label"],
-            "movement_cls":         status["cls"],
-        })
-
-    return result
+    @staticmethod
+    def _trim_history(address: str) -> None:
+        """Keep only the most recent MAX_HISTORY rows for this address."""
+        keep_ids = (
+            select(BluetoothHistory.id)
+            .where(BluetoothHistory.address == address)
+            .order_by(BluetoothHistory.recorded_at.desc())
+            .limit(MAX_HISTORY)
+            .subquery()
+        )
+        db.session.execute(
+            delete(BluetoothHistory)
+            .where(BluetoothHistory.address == address)
+            .where(BluetoothHistory.id.notin_(select(keep_ids.c.id)))
+            .execution_options(synchronize_session="fetch")
+        )

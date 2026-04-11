@@ -1,27 +1,25 @@
 // ── Configuration ─────────────────────────────────────────────────────────────
 
-const POLL_INTERVAL_MS       = 10_000;  // ms between auto-scans
-const COUNTDOWN_TICK_MS      = 500;     // ms between countdown label updates
-const DEFAULT_SCAN_TIMEOUT_S = 5;       // fallback when input is empty/invalid
+const POLL_INTERVAL_MS       = 10_000;
+const COUNTDOWN_TICK_MS      = 500;
+const DEFAULT_SCAN_TIMEOUT_S = 8;       // WiFi scans take longer than BLE
 
-// Signal quality breakpoints (%) — used only for bar CSS class
 const QUALITY_HIGH           = 60;
 const QUALITY_MEDIUM         = 30;
 
-// Fallback sentinels used when a field is null during sorting
 const SORT_FALLBACK_RSSI     = -200;
 const SORT_FALLBACK_DISTANCE = 9_999;
 
 // Graph SVG geometry (viewBox units)
 const GRAPH_W           = 260;
 const GRAPH_H           = 80;
-const GRAPH_PT          = 8;    // top padding
-const GRAPH_PB          = 16;   // bottom padding (time axis labels)
-const GRAPH_PL          = 30;   // left padding (y-axis labels)
-const GRAPH_PR          = 6;    // right padding
+const GRAPH_PT          = 8;
+const GRAPH_PB          = 16;
+const GRAPH_PL          = 30;
+const GRAPH_PR          = 6;
 const GRAPH_STROKE_W    = 1.8;
-const GRAPH_DOT_R       = 3;    // most-recent point dot radius
-const GRAPH_DOT_R_SMALL = 1.5;  // intermediate point dot radius
+const GRAPH_DOT_R       = 3;
+const GRAPH_DOT_R_SMALL = 1.5;
 
 // Colours
 const COLOR_RSSI        = '#58a6ff';
@@ -30,8 +28,8 @@ const COLOR_AWAY        = '#f85149';
 const COLOR_STABLE      = '#d29922';
 
 // API
-const API_DEVICES_PATH  = '/api/bluetooth/devices';
-const API_RESET_PATH    = '/api/bluetooth/reset';
+const API_DEVICES_PATH  = '/api/wifi/devices';
+const API_RESET_PATH    = '/api/wifi/reset';
 
 // Element IDs
 const EL_STATUS_BAR     = 'statusBar';
@@ -39,12 +37,12 @@ const EL_STATUS_TEXT    = 'statusText';
 const EL_COUNTDOWN      = 'countdown';
 const EL_SCAN_BTN       = 'scanBtn';
 const EL_AUTO_BTN       = 'autoToggleBtn';
+const EL_CLEAR_BTN      = 'clearBtn';
 const EL_ENV_SELECT     = 'envSelect';
 const EL_TIMEOUT_INPUT  = 'timeout';
 const EL_FILTER_INPUT   = 'filterInput';
 const EL_SORT_SELECT    = 'sortSelect';
 const EL_GRID           = 'grid';
-const EL_CLEAR_BTN      = 'clearBtn';
 
 // Button / UI labels
 const LABEL_SCAN_IDLE   = 'Scan';
@@ -104,7 +102,7 @@ async function startScan() {
   btn.classList.add(CLASS_SCANNING);
   btn.textContent = LABEL_SCAN_BUSY;
   stopCountdown();
-  setStatus('busy', `Scanning for ${timeout}s — please wait…`);
+  setStatus('busy', `Scanning for ${timeout}s — please wait\u2026`);
 
   try {
     const res = await fetch(`${API_DEVICES_PATH}?timeout=${timeout}&environment=${env}`);
@@ -116,7 +114,7 @@ async function startScan() {
     allDevices = data.devices || [];
     const active = allDevices.filter(d => d.active).length;
     const now = new Date().toLocaleTimeString();
-    setStatus('ok', `${active} active, ${allDevices.length - active} stale — last updated ${now}`);
+    setStatus('ok', `${active} active, ${allDevices.length - active} stale \u2014 last updated ${now}`);
     renderCards();
   } catch (e) {
     setStatus('err', `Error: ${e.message}`);
@@ -166,10 +164,11 @@ function renderCards() {
   let devices = allDevices.filter(d => {
     if (!filter) return true;
     return (
-      (d.name    || '').toLowerCase().includes(filter) ||
-      (d.address || '').toLowerCase().includes(filter) ||
-      (d.known_companies || []).some(c => c.toLowerCase().includes(filter)) ||
-      (d.device_profiles || []).some(p => p.toLowerCase().includes(filter))
+      (d.ssid     || '').toLowerCase().includes(filter) ||
+      (d.bssid    || '').toLowerCase().includes(filter) ||
+      (d.vendor   || '').toLowerCase().includes(filter) ||
+      (d.security || '').toLowerCase().includes(filter) ||
+      (d.band     || '').toLowerCase().includes(filter)
     );
   });
 
@@ -177,18 +176,18 @@ function renderCards() {
     switch (sort) {
       case 'rssi':     return (b.rssi ?? SORT_FALLBACK_RSSI) - (a.rssi ?? SORT_FALLBACK_RSSI);
       case 'distance': return (a.estimated_distance_m ?? SORT_FALLBACK_DISTANCE) - (b.estimated_distance_m ?? SORT_FALLBACK_DISTANCE);
-      case 'name':     return (a.name || 'zz').localeCompare(b.name || 'zz');
+      case 'name':     return (a.ssid || 'zz').localeCompare(b.ssid || 'zz');
       case 'quality':  return (b.signal_quality_pct ?? 0) - (a.signal_quality_pct ?? 0);
       default:         return 0;
     }
   });
 
   if (devices.length === 0 && allDevices.length === 0) {
-    grid.innerHTML = `<div id="placeholder"><div class="big">&#x1F4E1;</div>Hit <strong>Scan</strong> to discover nearby BLE devices.</div>`;
+    grid.innerHTML = `<div id="placeholder"><div class="big">&#x1F4F6;</div>Hit <strong>Scan</strong> to discover nearby WiFi networks.</div>`;
     return;
   }
   if (devices.length === 0) {
-    grid.innerHTML = `<div id="placeholder"><div class="big">&#x1F50D;</div>No devices match your filter.</div>`;
+    grid.innerHTML = `<div id="placeholder"><div class="big">&#x1F50D;</div>No networks match your filter.</div>`;
     return;
   }
 
@@ -197,7 +196,6 @@ function renderCards() {
 
 // ── Graph ─────────────────────────────────────────────────────────────────────
 
-// Format a relative time offset (negative seconds) for axis labels.
 function fmtRelTime(t) {
   if (Math.abs(t) < 1) return 'now';
   const s = Math.abs(Math.round(t));
@@ -207,16 +205,12 @@ function fmtRelTime(t) {
   return rem > 0 ? `-${m}m${rem}s` : `-${m}m`;
 }
 
-// Format a y-axis value label.
 function fmtVal(v) {
   if (Math.abs(v) >= 100) return v.toFixed(0);
   if (Math.abs(v) >= 10)  return v.toFixed(1);
   return v.toFixed(2);
 }
 
-// Draw a time-series graph for one field ('rssi' or 'distance') from history.
-// history: [{t, rssi, distance}, ...] where t=0 is the most recent reading.
-// gradId: unique SVG gradient id string.
 function drawGraph(history, field, { color, gradId }) {
   const pts = history.map(h => ({ t: h.t, v: h[field] })).filter(p => p.v != null);
 
@@ -231,7 +225,6 @@ function drawGraph(history, field, { color, gradId }) {
   const tRange = tMax - tMin || 1;
   const vRange = vMax - vMin || 1;
 
-  // Plot area boundaries
   const px1 = GRAPH_PL, px2 = GRAPH_W - GRAPH_PR;
   const py1 = GRAPH_PT, py2 = GRAPH_H - GRAPH_PB;
   const pw  = px2 - px1;
@@ -244,7 +237,6 @@ function drawGraph(history, field, { color, gradId }) {
   const linePath = coords.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
   const areaPath = `${linePath} L${coords.at(-1)[0].toFixed(1)},${py2} L${coords[0][0].toFixed(1)},${py2} Z`;
 
-  // 3 horizontal grid lines: min, mid, max
   const gridLines = [vMin, (vMin + vMax) / 2, vMax].map(v => {
     const gy = toY(v);
     return `
@@ -254,10 +246,9 @@ function drawGraph(history, field, { color, gradId }) {
         dominant-baseline="middle" text-anchor="end">${fmtVal(v)}</text>`;
   }).join('');
 
-  // Dots: small at each point, larger at the most recent
   const dots = coords.map(([x, y], i) => {
-    const r   = i === coords.length - 1 ? GRAPH_DOT_R : GRAPH_DOT_R_SMALL;
-    const op  = i === coords.length - 1 ? 1 : 0.5;
+    const r  = i === coords.length - 1 ? GRAPH_DOT_R : GRAPH_DOT_R_SMALL;
+    const op = i === coords.length - 1 ? 1 : 0.5;
     return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="${color}" opacity="${op}"/>`;
   }).join('');
 
@@ -291,31 +282,36 @@ function cardHTML(d) {
   const pct = d.signal_quality_pct ?? 0;
   const cls = qualityClass(pct);
 
-  const vendorBadges = (d.known_companies || []).map(c => {
-    const vcls = c === 'Apple' ? 'apple' : c === 'Microsoft' ? 'ms' : 'vendor';
-    return `<span class="badge badge-${vcls}">${escHtml(c)}</span>`;
-  }).join('');
+  // Band badge: colour-coded by frequency
+  const bandSlug  = d.band?.includes('2.4') ? '24' : d.band?.includes('6') ? '6' : '5';
+  const bandBadge = `<span class="badge badge-band-${bandSlug}">${escHtml(d.band || '')}</span>`;
 
-  const profileBadges = (d.device_profiles || [])
-    .map(p => `<span class="badge badge-profile">${escHtml(p)}</span>`)
-    .join('');
+  // Security badge: warn on open networks
+  const secType   = (d.security || 'Unknown');
+  const secCls    = secType === 'Open'          ? 'sec-open'
+                  : secType.includes('WPA3')    ? 'sec-wpa3'
+                  : 'sec-wpa2';
+  const secBadge  = `<span class="badge badge-${secCls}">${escHtml(secType)}</span>`;
 
-  const addrBadge  = `<span class="badge badge-${d.address_type}">${d.address_type}</span>`;
-  const distTxt    = d.estimated_distance_m != null ? `~${d.estimated_distance_m} m` : 'n/a';
-  const txTxt      = d.tx_power    != null ? `${d.tx_power} dBm`    : 'n/a';
-  const plTxt      = d.path_loss_db != null ? `${d.path_loss_db} dB` : 'n/a';
-  const tagSection = (vendorBadges || profileBadges)
-    ? `<div class="tags">${vendorBadges}${profileBadges}</div>` : '';
+  // Vendor badge (only when known)
+  const vendorBadge = d.vendor
+    ? `<span class="badge badge-vendor">${escHtml(d.vendor)}</span>` : '';
+
+  const tagSection = (vendorBadge || secBadge || bandBadge)
+    ? `<div class="tags">${vendorBadge}${secBadge}${bandBadge}</div>` : '';
+
+  const distTxt  = d.estimated_distance_m != null ? `~${d.estimated_distance_m} m` : 'n/a';
+  const chanTxt  = d.channel != null ? `Ch\u00a0${d.channel}` : 'n/a';
+  const freqTxt  = d.frequency_mhz ? `${d.frequency_mhz}\u00a0MHz` : 'n/a';
 
   const movCls    = d.movement_cls || 'tracking';
   const distColor = movCls === 'closer' ? COLOR_CLOSER
                   : movCls === 'away'   ? COLOR_AWAY
                   : COLOR_STABLE;
 
-  // Unique gradient IDs per device to avoid SVG conflicts
-  const addrSlug  = d.address.replace(/:/g, '');
-  const rssiGraph = drawGraph(d.history || [], 'rssi',     { color: COLOR_RSSI, gradId: `gr-${addrSlug}` });
-  const distGraph = drawGraph(d.history || [], 'distance', { color: distColor,  gradId: `gd-${addrSlug}` });
+  const bssidSlug = d.bssid.replace(/:/g, '');
+  const rssiGraph = drawGraph(d.history || [], 'rssi',     { color: COLOR_RSSI, gradId: `gr-${bssidSlug}` });
+  const distGraph = drawGraph(d.history || [], 'distance', { color: distColor,  gradId: `gd-${bssidSlug}` });
 
   const staleClass   = d.active ? '' : ' stale';
   const lastSeenNote = d.active ? '' : `<div class="last-seen">Last seen ${Math.round(d.last_seen_s)}s ago</div>`;
@@ -324,10 +320,10 @@ function cardHTML(d) {
   <div class="card${staleClass}">
     <div class="card-header">
       <div>
-        <div class="card-name">${escHtml(d.name)}</div>
-        <div class="card-addr">${escHtml(d.address)}</div>
+        <div class="card-name">${escHtml(d.ssid)}</div>
+        <div class="card-addr">${escHtml(d.bssid)}</div>
       </div>
-      ${addrBadge}
+      ${bandBadge}
     </div>
 
     ${lastSeenNote}
@@ -346,15 +342,16 @@ function cardHTML(d) {
 
     <div class="meta">
       <span class="meta-key">Distance</span><span class="meta-val">${distTxt}</span>
-      <span class="meta-key">TX Power</span><span class="meta-val">${txTxt}</span>
-      <span class="meta-key">Path Loss</span><span class="meta-val">${plTxt}</span>
+      <span class="meta-key">Channel</span><span class="meta-val">${chanTxt}</span>
+      <span class="meta-key">Frequency</span><span class="meta-val">${freqTxt}</span>
+      <span class="meta-key">Security</span><span class="meta-val">${escHtml(secType)}</span>
     </div>
 
     ${tagSection}
 
     <div class="graphs">
       <div class="graph-block">
-        <div class="graph-title">RSSI <span class="graph-unit">(dBm)</span></div>
+        <div class="graph-title">Signal <span class="graph-unit">(dBm)</span></div>
         ${rssiGraph}
       </div>
       <div class="graph-block">

@@ -9,3 +9,8 @@ dist/
 build/
 .DS_Store
 /instance
+
+# Legacy DB location (moved to /db at project root)
+radar.db
+radar.db-wal
+radar.db-shm

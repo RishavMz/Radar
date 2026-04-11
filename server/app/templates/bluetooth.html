@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Radar — Bluetooth Scanner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
+</head>
+<body>
+
+<header>
+  <h1>&#x25C9; <span>Radar</span></h1>
+
+  <nav class="mode-nav">
+    <a href="/dashboard/bluetooth" class="mode-btn active">Bluetooth</a>
+    <a href="/dashboard/wifi"      class="mode-btn">WiFi</a>
+  </nav>
+
+  <div class="controls">
+    <label for="envSelect">Environment</label>
+    <select id="envSelect">
+      <option value="outdoor">Outdoor</option>
+      <option value="indoor_open">Indoor &ndash; Open</option>
+      <option value="indoor_mixed" selected>Indoor &ndash; Mixed</option>
+      <option value="indoor_dense">Indoor &ndash; Dense</option>
+    </select>
+
+    <label for="timeout">Timeout (s)</label>
+    <input type="number" id="timeout" value="5" min="1" max="30" step="1" />
+
+    <button id="scanBtn" onclick="startScan()">Scan</button>
+    <button id="autoToggleBtn" onclick="toggleAutoPoll()">Auto: Off</button>
+    <button id="clearBtn" onclick="clearData()">Clear Data</button>
+  </div>
+</header>
+
+<div id="statusBar">
+  <span class="dot"></span>
+  <span id="statusText">Ready — press Scan to discover nearby devices.</span>
+  <span id="countdown"></span>
+</div>
+
+<div id="toolbar">
+  <label for="filterInput">Filter</label>
+  <input type="text" id="filterInput" placeholder="name, address, profile&hellip;" oninput="renderCards()" />
+
+  <label for="sortSelect">Sort by</label>
+  <select id="sortSelect" onchange="renderCards()">
+    <option value="rssi">Signal (strongest)</option>
+    <option value="distance">Distance (nearest)</option>
+    <option value="name">Name (A&ndash;Z)</option>
+    <option value="quality">Quality %</option>
+  </select>
+</div>
+
+<div id="grid">
+  <div id="placeholder">
+    <div class="big">&#x1F4E1;</div>
+    Hit <strong>Scan</strong> to discover nearby BLE devices.
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='scripts/app.js') }}"></script>
+</body>
+</html>
