@@ -43,6 +43,33 @@ header h1 {
 
 header h1 span { color: var(--text); }
 
+/* ── Mode nav ── */
+.mode-nav {
+  display: flex;
+  gap: .2rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: .2rem;
+}
+
+.mode-btn {
+  padding: .28rem .9rem;
+  border-radius: 6px;
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+  transition: background .15s, color .15s;
+}
+
+.mode-btn:hover { color: var(--text); }
+
+.mode-btn.active {
+  background: var(--accent);
+  color: #0d1117;
+}
+
 .controls {
   display: flex;
   align-items: center;
@@ -228,6 +255,14 @@ select {
 .badge-profile { background: var(--accent-dim); color: var(--accent); }
 .badge-random  { background: #2d1a2d; color: #c792ea; }
 .badge-public  { background: #1a2d1a; color: var(--green); }
+
+/* WiFi-specific badges */
+.badge-band-24  { background: #1a2a3d; color: #79b8ff; }
+.badge-band-5   { background: #1a3d2a; color: #3fb950; }
+.badge-band-6   { background: #2d1a3d; color: #c792ea; }
+.badge-sec-open { background: #2d1a1a; color: var(--red); }
+.badge-sec-wpa2 { background: #1a2d1a; color: var(--green); }
+.badge-sec-wpa3 { background: #1a2d4f; color: var(--ms); }
 
 /* ── Signal bar ── */
 .signal-row {

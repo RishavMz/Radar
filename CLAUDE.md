@@ -5,30 +5,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development Guidelines
 
 - **Do not commit changes to git unless explicitly instructed by the user.** Always propose changes and wait for confirmation before running `git commit` or `git push`.
+- **Update CLAUDE.md and README.md on every major change.** Keep both files accurate and concise — remove stale content rather than appending to it. Do not let either file bloat with outdated information.
 
 ## Project
 
-Radar is a BLE (Bluetooth Low Energy) device scanner with a Flask REST API backend. It discovers nearby Bluetooth devices and returns rich metadata including distance estimates, signal quality, vendor identification, and device profiles.
+Radar is a BLE and WiFi scanner with a Flask REST API backend and a web dashboard. It discovers nearby Bluetooth and WiFi devices and returns rich metadata including estimated distance, signal quality, vendor identification, and movement trends.
 
 ## Repository Structure
 
 ```
 Radar/
-├── server/                        # Flask server — API + frontend
+├── db/                            # Gitignored — SQLite DB + WAL/SHM files live here
+├── server/
 │   ├── app/
-│   │   ├── __init__.py            # App factory (create_app); serves / via render_template
-│   │   ├── api/
-│   │   │   └── routes.py          # REST endpoints (/api/devices, /api/reset)
+│   │   ├── __init__.py            # App factory: init SQLAlchemy, register blueprints
+│   │   ├── config.py              # Flask config (DB path, SQLAlchemy settings)
+│   │   ├── models/
+│   │   │   ├── base.py            # db = SQLAlchemy(); WAL/FK pragmas via event hook
+│   │   │   ├── bluetooth.py       # BluetoothDevice, BluetoothHistory (ORM models)
+│   │   │   └── wifi.py            # WifiDevice, WifiHistory (ORM models)
+│   │   ├── core/
+│   │   │   ├── distance.py        # DistanceEstimator — path-loss model, signal quality
+│   │   │   ├── movement.py        # MovementClassifier — speed derivation, classification
+│   │   │   ├── store.py           # DeviceStore — protocol-agnostic in-memory cache
+│   │   │   └── scanner.py         # BaseScanner ABC — common scan flow (OCP, LSP)
 │   │   ├── bluetooth/
-│   │   │   └── scanner.py         # BLE scanning via bleak; device store; movement logic
+│   │   │   ├── metadata.py        # COMPANY_IDS, SERVICE_PROFILES, BLE helper functions
+│   │   │   └── scanner.py         # BluetoothScanner(BaseScanner) — bleak + ORM
+│   │   ├── wifi/
+│   │   │   ├── metadata.py        # OUI_MAP, WiFi helper functions
+│   │   │   └── scanner.py         # WifiScanner(BaseScanner) — nmcli + ORM
+│   │   ├── api/
+│   │   │   ├── bluetooth.py       # Blueprint: /api/bluetooth/devices, /api/bluetooth/reset
+│   │   │   └── wifi.py            # Blueprint: /api/wifi/devices,      /api/wifi/reset
 │   │   ├── static/
-│   │   │   ├── css/styles.css     # All UI styles
-│   │   │   └── scripts/app.js     # Frontend logic (polling, graphs, status)
+│   │   │   ├── css/styles.css     # All UI styles (shared by both dashboards)
+│   │   │   └── scripts/
+│   │   │       ├── app.js         # Bluetooth dashboard logic
+│   │   │       └── wifi.js        # WiFi dashboard logic
 │   │   └── templates/
-│   │       └── index.html         # Main page template
-│   ├── requirements.txt           # flask, bleak
-│   ├── .env                       # Deployment-level env vars only (host, port, DB URL)
-│   └── run.py                     # Entrypoint (Flask dev server, port 5000)
+│   │       ├── bluetooth.html     # BLE dashboard page
+│   │       └── wifi.html          # WiFi dashboard page
+│   ├── requirements.txt           # flask, flask-sqlalchemy, bleak, python-dotenv
+│   ├── .env                       # Local deployment config (gitignored)
+│   ├── .env.example               # Template for .env
+│   └── run.py                     # Entrypoint: loads .env, starts Flask dev server
+├── .gitignore                     # Excludes /db/*.db, /db/*.db-wal, /db/*.db-shm
 └── README.md
 ```
 
@@ -36,34 +58,84 @@ Radar/
 
 ```bash
 cd server
+cp .env.example .env        # first time only
+pip install -r requirements.txt
 sudo venv/bin/python run.py
 ```
 
-Requires a Bluetooth adapter and either `sudo` or `CAP_NET_RAW` capability on the Python binary.
+Requires a Bluetooth adapter and either `sudo` or `CAP_NET_RAW` on the Python binary.
+WiFi scanning requires `nmcli` (NetworkManager) to be available.
 
-The web UI is served at `http://localhost:5000`. There is no separate frontend server.
+The web UI is served at `http://localhost:5000`. No separate frontend server.
+
+## Architecture — SOLID Design
+
+### Common (protocol-agnostic) flow
+
+```
+BaseScanner.get_devices(timeout, environment)
+  ├─ _init_store()       [once, lazy]  — load DB → DeviceStore
+  ├─ _do_scan()          [abstract]    — BLE callback / nmcli subprocess
+  │    └─ returns (readings, active_keys, scan_time)
+  ├─ DeviceStore.update() per reading
+  ├─ _persist_reading()  [abstract]    — ORM upsert + history insert
+  ├─ db.session.commit() [single commit per scan]
+  └─ _build_results()                  — smooth RSSI, movement, format JSON
+```
+
+### Adding a new protocol
+
+1. Create `app/<protocol>/metadata.py` (constants + pure helpers)
+2. Create `app/<protocol>/scanner.py` — extend `BaseScanner`, implement the four abstract methods
+3. Create `app/models/<protocol>.py` — two ORM models: device + history
+4. Create `app/api/<protocol>.py` — Blueprint with `/devices` GET and `/reset` POST
+5. Register blueprint in `app/__init__.py` and import models for `db.create_all()`
 
 ## Key Design Decisions
 
-- **bleak** is used for BLE scanning (not scapy). Scapy's AsyncSniffer uses libpcap which doesn't support HCI interfaces on Linux.
-- The scanner is synchronous (`get_bluetooth_devices`) wrapping an async bleak scan via `asyncio.run()`. Flask routes call it directly.
-- Distance estimation uses the log-distance path-loss model: `10 ^ ((tx_power - rssi) / (10 * n))` with a default TX power of `-59 dBm` when not advertised.
-- Environment profiles control the path-loss exponent `n`: `outdoor` (2.0), `indoor_open` (2.5), `indoor_mixed` (3.0, default), `indoor_dense` (3.5). Higher `n` means signal falls off faster, giving more realistic indoor estimates.
-- RSSI is smoothed over a 5-reading window before computing distance and signal quality, to reduce single-reading noise.
-- `address_type` is derived from the MAC address first byte (≥ 0xC0 → random).
-- The frontend is served from Flask itself (`/`) so no CORS configuration is needed. `app.js` calls `/api/devices` and `/api/reset` via relative paths.
-- Per-device RSSI and distance history is accumulated **server-side** in `_device_store` (a module-level dict in `scanner.py`) across scan cycles. History is returned as relative timestamps (`t=0` = most recent reading). Devices not seen in the current scan are returned as stale (`active: false`) with `last_seen_s` set.
-- Movement classification (`_compute_speeds`, `_movement_status`) runs server-side and is returned as `movement_label` / `movement_cls` fields. The JS renders these directly without any business logic.
-- `.env` contains **deployment-level config only** (Flask host/port, database URL). Algorithm constants (TX power defaults, path-loss exponents, history window sizes, speed thresholds) live as named constants in `scanner.py`.
+- **ORM**: Flask-SQLAlchemy 3.x with SQLAlchemy 2.x declarative models. No raw SQL. JSON columns handled transparently (lists/dicts auto-serialised).
+- **DB location**: `db/radar.db` at the project root (not inside `server/`). WAL and SHM journal files co-locate automatically and are all gitignored.
+- **WAL mode**: Enabled per-connection via a `@event.listens_for(Engine, "connect")` hook in `models/base.py`.
+- **bleak** is used for BLE scanning (not scapy). `asyncio.run()` wraps the async scan inside a synchronous `_do_scan`.
+- **WiFi scanning** uses `nmcli --rescan yes` via `subprocess`. Output parsed per-line; BSSID colons unescaped from nmcli terse format.
+- **Distance estimation**: log-distance path-loss model `10 ^ ((ref - rssi) / (10 * n))`. BLE ref = `tx_power` (default `-59 dBm`); WiFi ref = `-40 dBm` (fixed).
+- **Environment profiles** control path-loss exponent `n`: `outdoor` (2.0), `indoor_open` (2.5), `indoor_mixed` (3.0, default), `indoor_dense` (3.5).
+- **RSSI smoothing** over a 5-reading window before computing distance and signal quality.
+- **Movement classification** runs server-side in `MovementClassifier`; returned as `movement_label` / `movement_cls`.
+- **In-memory DeviceStore**: populated once from DB (lazy), updated on every reading. `db.session.commit()` called once per scan (not per device) for efficiency.
+- **History trimmed** to 30 rows per device: after each `flush()`, a subquery deletes the oldest rows beyond the limit.
+- **Single-commit scan**: all ORM writes for one scan are staged then committed together; a rollback fires on any exception.
+- `db.create_all()` replaces the old migration runner. Schema changes requiring ALTER TABLE should use Alembic.
 
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/` | Web UI (device dashboard) |
-| GET | `/api/devices` | Scan and return nearby BLE devices |
-| POST | `/api/reset` | Clear all stored device history |
+| GET | `/` | Redirects to `/dashboard/bluetooth` |
+| GET | `/dashboard/bluetooth` | BLE scanner dashboard |
+| GET | `/dashboard/wifi` | WiFi scanner dashboard |
+| GET | `/api/bluetooth/devices` | Scan and return nearby BLE devices |
+| POST | `/api/bluetooth/reset` | Clear all BLE device history |
+| GET | `/api/wifi/devices` | Scan and return nearby WiFi networks |
+| POST | `/api/wifi/reset` | Clear all WiFi device history |
 
-Query params for `/api/devices`:
+Query params for `/api/bluetooth/devices` and `/api/wifi/devices`:
 - `timeout` (float, default `5.0`) — scan duration in seconds
 - `environment` (string, default `indoor_mixed`) — one of `outdoor`, `indoor_open`, `indoor_mixed`, `indoor_dense`
+
+## Database Schema
+
+```
+bluetooth_devices   address (PK), name, tx_power, address_type, is_apple, is_microsoft,
+                    known_companies (JSON), device_profiles (JSON), service_uuids (JSON),
+                    manufacturer_data (JSON), service_data (JSON), last_seen_at, created_at
+
+bluetooth_history   id (PK), address (FK → bluetooth_devices, CASCADE), rssi, distance, recorded_at
+
+wifi_devices        bssid (PK), ssid, frequency_mhz, channel, band, security, vendor,
+                    last_seen_at, created_at
+
+wifi_history        id (PK), bssid (FK → wifi_devices, CASCADE), rssi, distance, recorded_at
+```
+
+Tables are created automatically by `db.create_all()` on app startup.
