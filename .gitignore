@@ -1,0 +1,22 @@
+# Database files (SQLite + WAL/SHM journal files)
+/db/*.db
+/db/*.db-wal
+/db/*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment
+.env
+.DS_Store
+
+# Flask instance folder
+/instance/
