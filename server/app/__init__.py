@@ -21,22 +21,20 @@ def create_app() -> Flask:
 
     # Register blueprints.
     from .api.bluetooth import bluetooth_bp
-    from .api.wifi import wifi_bp
+    from .api.wifi      import wifi_bp
+    from .api.sonar     import sonar_bp
 
     app.register_blueprint(bluetooth_bp, url_prefix="/api/bluetooth")
     app.register_blueprint(wifi_bp,      url_prefix="/api/wifi")
+    app.register_blueprint(sonar_bp,     url_prefix="/api/sonar")
 
     # Dashboard routes.
     @app.get("/")
     def index():
-        return redirect(url_for("bluetooth_dashboard"))
+        return redirect(url_for("sonar_dashboard"))
 
-    @app.get("/dashboard/bluetooth")
-    def bluetooth_dashboard():
-        return render_template("bluetooth.html")
-
-    @app.get("/dashboard/wifi")
-    def wifi_dashboard():
-        return render_template("wifi.html")
+    @app.get("/dashboard/sonar")
+    def sonar_dashboard():
+        return render_template("sonar.html")
 
     return app

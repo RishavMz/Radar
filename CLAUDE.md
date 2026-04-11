@@ -37,15 +37,14 @@ Radar/
 │   │   │   └── scanner.py         # WifiScanner(BaseScanner) — nmcli + ORM
 │   │   ├── api/
 │   │   │   ├── bluetooth.py       # Blueprint: /api/bluetooth/devices, /api/bluetooth/reset
-│   │   │   └── wifi.py            # Blueprint: /api/wifi/devices,      /api/wifi/reset
+│   │   │   ├── wifi.py            # Blueprint: /api/wifi/devices,      /api/wifi/reset
+│   │   │   └── sonar.py           # Blueprint: /api/sonar/snapshot (concurrent BLE+WiFi, fused)
 │   │   ├── static/
-│   │   │   ├── css/styles.css     # All UI styles (shared by both dashboards)
+│   │   │   ├── css/styles.css     # All UI styles
 │   │   │   └── scripts/
-│   │   │       ├── app.js         # Bluetooth dashboard logic
-│   │   │       └── wifi.js        # WiFi dashboard logic
+│   │   │       └── sonar.js       # Sonar dashboard: radar + dual spectrum + modal
 │   │   └── templates/
-│   │       ├── bluetooth.html     # BLE dashboard page
-│   │       └── wifi.html          # WiFi dashboard page
+│   │       └── sonar.html         # Main (only) dashboard — fused BLE + WiFi
 │   ├── requirements.txt           # flask, flask-sqlalchemy, bleak, python-dotenv
 │   ├── .env                       # Local deployment config (gitignored)
 │   ├── .env.example               # Template for .env
@@ -105,21 +104,24 @@ BaseScanner.get_devices(timeout, environment)
 - **In-memory DeviceStore**: populated once from DB (lazy), updated on every reading. `db.session.commit()` called once per scan (not per device) for efficiency.
 - **History trimmed** to 30 rows per device: after each `flush()`, a subquery deletes the oldest rows beyond the limit.
 - **Single-commit scan**: all ORM writes for one scan are staged then committed together; a rollback fires on any exception.
+- **Sonar concurrent scan**: `ThreadPoolExecutor(max_workers=2)` runs BLE and WiFi in parallel; each thread pushes its own Flask app context via `_run_in_app_context`.
+- **Radar scale**: logarithmic — `logR(d) = log(d+1) / log(MAX+1) * R`. Selectable range: 15/30/50/75/100 m.
+- **Pseudo-angles**: `MD5(device_id)[:8] % 360` — deterministic, stable across polls. True bearing requires AoA/AoD hardware.
 - `db.create_all()` replaces the old migration runner. Schema changes requiring ALTER TABLE should use Alembic.
 
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/` | Redirects to `/dashboard/bluetooth` |
-| GET | `/dashboard/bluetooth` | BLE scanner dashboard |
-| GET | `/dashboard/wifi` | WiFi scanner dashboard |
+| GET | `/` | Redirects to `/dashboard/sonar` |
+| GET | `/dashboard/sonar` | Main dashboard — fused radar + dual spectrum + device modal |
+| GET | `/api/sonar/snapshot` | Concurrent BLE + WiFi scan; fused device list with `angle_deg` |
 | GET | `/api/bluetooth/devices` | Scan and return nearby BLE devices |
 | POST | `/api/bluetooth/reset` | Clear all BLE device history |
 | GET | `/api/wifi/devices` | Scan and return nearby WiFi networks |
 | POST | `/api/wifi/reset` | Clear all WiFi device history |
 
-Query params for `/api/bluetooth/devices` and `/api/wifi/devices`:
+Query params for all scan endpoints:
 - `timeout` (float, default `5.0`) — scan duration in seconds
 - `environment` (string, default `indoor_mixed`) — one of `outdoor`, `indoor_open`, `indoor_mixed`, `indoor_dense`
 

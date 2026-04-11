@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Radar &mdash; Sonar</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
+  <style>
+    /* ── Lock page to viewport — all scrolling is inside panels only ── */
+    html, body { height: 100%; overflow: hidden; }
+
+    /* ── Page layout ── */
+    #sonar-main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ── Left column: radar + spectrums ── */
+    #radarPanel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1rem 1.5rem 1.25rem 2rem;
+      gap: .8rem;
+      flex: 1;
+      min-width: 0;
+      overflow-y: auto;
+    }
+
+    #radarCanvas {
+      display: block;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      cursor: crosshair;
+      flex-shrink: 0;
+    }
+
+    #radarLegend {
+      display: flex;
+      gap: 1.25rem;
+      font-size: .72rem;
+      color: var(--muted);
+      align-self: flex-start;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .legend-swatch { display: inline-flex; align-items: center; gap: .3rem; }
+    .legend-dot    { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+    /* ── Spectrum panels ── */
+    .spectrum-wrap  { width: 100%; }
+
+    .spectrum-title {
+      font-size: .68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: .3rem;
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+    }
+
+    .spectrum-title.ble-title  { color: #58a6ff; }
+    .spectrum-title.wifi-title { color: #f0883e; }
+
+    .spectrum-canvas {
+      display: block;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      width: 100%;
+    }
+
+    #radarNote {
+      font-size: .67rem;
+      color: var(--muted);
+      font-style: italic;
+      align-self: flex-start;
+      line-height: 1.6;
+    }
+
+    /* ── Right column: device panel — its own independent scrollbar ── */
+    #devicePanel {
+      width: 300px;
+      flex-shrink: 0;
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: scroll;     /* always show scrollbar so it's clearly independent */
+      scrollbar-width: thin;  /* Firefox */
+      scrollbar-color: #30363d transparent;
+    }
+    #devicePanel::-webkit-scrollbar       { width: 5px; }
+    #devicePanel::-webkit-scrollbar-track { background: transparent; }
+    #devicePanel::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+    .section-header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      padding: .5rem 1rem;
+      font-size: .72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      user-select: none;
+    }
+
+    .section-header.ble-header  { color: #58a6ff; }
+    .section-header.wifi-header { color: #f0883e; border-top: 1px solid var(--border); }
+
+    .section-count {
+      margin-left: auto;
+      font-size: .68rem;
+      font-weight: 400;
+      color: var(--muted);
+      font-family: monospace;
+    }
+
+    .section-empty {
+      padding: .6rem 1rem .9rem;
+      font-size: .78rem;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    /* Device rows */
+    .device-row {
+      display: flex;
+      align-items: center;
+      gap: .55rem;
+      padding: .42rem 1rem;
+      cursor: pointer;
+      border-left: 2px solid transparent;
+      transition: background .1s, border-color .1s;
+      position: relative;
+    }
+
+    .device-row:hover            { background: var(--surface); }
+    .device-row.selected         { border-left-color: var(--accent); background: var(--accent-dim); }
+    .device-row.canvas-highlight { background: #1e2a1e; border-left-color: #3fb950; }
+    .device-row.stale            { opacity: .5; }
+
+    .device-type-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .device-info     { flex: 1; min-width: 0; }
+
+    .device-name {
+      font-size: .78rem;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .device-sub {
+      font-size: .67rem;
+      color: var(--muted);
+      font-family: monospace;
+      margin-top: .08rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .device-right { text-align: right; flex-shrink: 0; }
+    .device-dist  { font-size: .75rem; font-family: monospace; color: var(--text); }
+    .device-mov   { font-size: .62rem; margin-top: .1rem; }
+
+    .mov-closer   { color: var(--green); }
+    .mov-away     { color: var(--red);   }
+    .mov-stable   { color: var(--accent);}
+    .mov-tracking { color: var(--muted); }
+
+    /* ── Radar tooltip ── */
+    #radarTooltip {
+      position: fixed;
+      z-index: 100;
+      background: #1c2128;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .35rem .65rem;
+      font-size: .75rem;
+      color: var(--text);
+      pointer-events: none;
+      white-space: nowrap;
+      display: none;
+      box-shadow: 0 4px 12px rgba(0,0,0,.5);
+    }
+
+    #radarTooltip .tt-name  { font-weight: 600; }
+    #radarTooltip .tt-dist  { color: var(--muted); font-family: monospace; font-size: .7rem; }
+    #radarTooltip .tt-rssi  { color: var(--muted); font-family: monospace; font-size: .7rem; }
+
+    /* ── Device detail modal ── */
+    #deviceModal {
+      position: fixed;
+      z-index: 200;
+      right: 308px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 330px;
+      max-height: 80vh;
+      overflow-y: auto;
+      background: #1c2128;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.6);
+      display: none;
+      flex-direction: column;
+    }
+
+    #deviceModal.visible { display: flex; }
+
+    .modal-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding: .85rem 1rem .6rem;
+      border-bottom: 1px solid var(--border);
+      gap: .5rem;
+      flex-shrink: 0;
+    }
+
+    .modal-name  { font-size: .95rem; font-weight: 700; word-break: break-all; }
+    .modal-id    { font-size: .68rem; color: var(--muted); font-family: monospace; margin-top: .15rem; }
+    .modal-close {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      font-size: 1.1rem; line-height: 1; padding: 0; flex-shrink: 0; margin-top: .1rem;
+    }
+    .modal-close:hover { color: var(--text); }
+
+    .modal-body  { padding: .75rem 1rem; display: flex; flex-direction: column; gap: .65rem; }
+
+    .modal-metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: .3rem .6rem;
+      font-size: .78rem;
+    }
+
+    .mm-key { color: var(--muted); }
+    .mm-val { color: var(--text); font-family: monospace; }
+
+    .modal-quality-bar {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      font-size: .72rem;
+    }
+    .modal-quality-bar .bar-track { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .modal-quality-bar .bar-fill  { height: 100%; border-radius: 3px; }
+
+    .modal-movement {
+      font-size: .78rem;
+      font-weight: 700;
+      padding: .3rem .6rem;
+      border-radius: 6px;
+      text-align: center;
+    }
+
+    .modal-section-title {
+      font-size: .68rem;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      margin-top: .2rem;
+    }
+
+    .modal-graph { display: block; }
+
+    .modal-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
+
+    .modal-kv {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: .2rem .6rem;
+      font-size: .72rem;
+    }
+    .modal-kv-key { color: var(--muted); }
+    .modal-kv-val { color: var(--text); font-family: monospace; word-break: break-all; }
+
+    /* ── Responsive ── */
+    @media (max-width: 900px) {
+      html, body   { overflow: hidden; }
+      #sonar-main  { flex-direction: column; overflow: hidden; }
+      #radarPanel  { overflow-y: scroll; max-height: 60vh; scrollbar-width: thin; scrollbar-color: #30363d transparent; }
+      #devicePanel { width: 100%; border-left: none; border-top: 1px solid var(--border); max-height: 40vh; }
+      #deviceModal { right: 8px; top: auto; bottom: 4px; transform: none; max-height: 55vh; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>&#x25C9; <span>Radar</span></h1>
+
+  <nav class="mode-nav">
+    <a href="/dashboard/sonar" class="mode-btn active">Sonar</a>
+  </nav>
+
+  <div class="controls">
+    <label for="rangeSelect">Range</label>
+    <select id="rangeSelect" onchange="updateRange()">
+      <option value="15">15 m</option>
+      <option value="30">30 m</option>
+      <option value="50" selected>50 m</option>
+      <option value="75">75 m</option>
+      <option value="100">100 m</option>
+    </select>
+
+    <label for="envSelect">Environment</label>
+    <select id="envSelect">
+      <option value="outdoor">Outdoor</option>
+      <option value="indoor_open">Indoor &ndash; Open</option>
+      <option value="indoor_mixed" selected>Indoor &ndash; Mixed</option>
+      <option value="indoor_dense">Indoor &ndash; Dense</option>
+    </select>
+
+    <label for="timeout">Timeout (s)</label>
+    <input type="number" id="timeout" value="5" min="1" max="30" step="1" />
+
+    <button id="scanBtn"       onclick="startScan()">Scan</button>
+    <button id="autoToggleBtn" onclick="toggleAutoPoll()">Auto: Off</button>
+    <button id="resetBtn"      onclick="resetAll()">Reset</button>
+  </div>
+</header>
+
+<div id="statusBar">
+  <span class="dot"></span>
+  <span id="statusText">Ready &mdash; press Scan to run a fused BLE + WiFi sweep.</span>
+  <span id="countdown"></span>
+</div>
+
+<div id="sonar-main">
+
+  <!-- ── Left: radar + dual spectrum ── -->
+  <div id="radarPanel">
+
+    <canvas id="radarCanvas"></canvas>
+
+    <div id="radarLegend">
+      <span class="legend-swatch"><span class="legend-dot" style="background:#58a6ff"></span>BLE</span>
+      <span class="legend-swatch"><span class="legend-dot" style="background:#f0883e"></span>WiFi</span>
+      <span class="legend-swatch">
+        <span style="display:inline-block;width:14px;height:3px;background:#3fb950;border-radius:2px;vertical-align:middle"></span>
+        Sweep
+      </span>
+      <span class="legend-swatch" style="color:#8b949e;font-size:.67rem">
+        Radial axis: <strong style="color:var(--accent)">logarithmic scale</strong>
+        &nbsp;&bull;&nbsp; dot size &prop; signal
+        &nbsp;&bull;&nbsp; glow = approaching
+        &nbsp;&bull;&nbsp; hover for names &amp; details
+      </span>
+    </div>
+
+    <div class="spectrum-wrap">
+      <div class="spectrum-title ble-title">&#x25C6; BLE &mdash; 2.4 GHz (2400&ndash;2485 MHz)</div>
+      <canvas id="bleSpectrumCanvas" class="spectrum-canvas" height="90"></canvas>
+    </div>
+
+    <div class="spectrum-wrap">
+      <div class="spectrum-title wifi-title">&#x1F4F6; WiFi &mdash; 2.4 / 5 / 6 GHz (2400&ndash;5950 MHz)</div>
+      <canvas id="wifiSpectrumCanvas" class="spectrum-canvas" height="90"></canvas>
+    </div>
+
+    <div id="radarNote">
+      &#9432; <strong>Logarithmic scale:</strong> ring radii follow log(d+1) so nearby devices
+      spread out visually while distant ones stay visible. Actual distances are shown on each ring.<br>
+      Angular positions are hash-derived (stable per device) &mdash; true bearing requires
+      multi-antenna hardware (AoA/AoD). BLE positions in the spectrum strip are also
+      hash-derived within the band; BLE frequency-hops in practice.
+    </div>
+
+  </div>
+
+  <!-- ── Right: split device panel ── -->
+  <div id="devicePanel">
+
+    <div class="section-header ble-header">
+      <span>&#x25C6; Bluetooth</span>
+      <span class="section-count" id="bleCount">0 devices</span>
+    </div>
+    <div id="bleDeviceList">
+      <div class="section-empty">Hit <strong>Scan</strong> to discover nearby BLE devices.</div>
+    </div>
+
+    <div class="section-header wifi-header">
+      <span>&#x1F4F6; WiFi</span>
+      <span class="section-count" id="wifiCount">0 networks</span>
+    </div>
+    <div id="wifiDeviceList">
+      <div class="section-empty">Hit <strong>Scan</strong> to discover nearby WiFi networks.</div>
+    </div>
+
+  </div>
+
+</div>
+
+<!-- ── Radar hover tooltip ── -->
+<div id="radarTooltip">
+  <div class="tt-name" id="ttName"></div>
+  <div class="tt-dist" id="ttDist"></div>
+  <div class="tt-rssi" id="ttRssi"></div>
+</div>
+
+<!-- ── Device detail modal (sidebar hover) ── -->
+<div id="deviceModal"
+     onmouseenter="cancelModalClose()"
+     onmouseleave="scheduleModalClose()">
+  <div class="modal-header">
+    <div>
+      <div class="modal-name" id="modalName"></div>
+      <div class="modal-id"   id="modalId"></div>
+    </div>
+    <button class="modal-close" onclick="forceCloseModal()">&#x2715;</button>
+  </div>
+  <div class="modal-body" id="modalBody"></div>
+</div>
+
+<script src="{{ url_for('static', filename='scripts/sonar.js') }}"></script>
+</body>
+</html>
