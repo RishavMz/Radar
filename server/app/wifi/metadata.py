@@ -7,9 +7,15 @@ output, converting signal quality, and classifying frequency bands.
 
 import re
 
-# Reference RSSI at 1 m for a typical WiFi access point (dBm).
-# APs usually transmit at ~20 dBm; at 1 m the received signal is ~-40 dBm.
-DEFAULT_REF_RSSI = -40
+# Reference RSSI at 1 m varies by band — 5 GHz has ~5 dB higher free-space path
+# loss vs 2.4 GHz, and 6 GHz adds another ~3 dB on top.
+def ref_rssi_for_freq(freq_mhz: int) -> float:
+    """Return the appropriate 1-metre reference RSSI for a given frequency."""
+    if freq_mhz >= 6000:
+        return -48.0
+    if freq_mhz >= 5000:
+        return -45.0
+    return -40.0
 
 # OUI prefix (first 3 octets, upper-case, colon-separated) → vendor name.
 OUI_MAP: dict[str, str] = {

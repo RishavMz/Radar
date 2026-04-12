@@ -18,6 +18,8 @@ def create_app() -> Flask:
         from .models import bluetooth  # noqa: F401
         from .models import wifi       # noqa: F401
         db.create_all()
+        from .models.migrations import migrate_db
+        migrate_db(db.engine)
 
     # Register blueprints.
     from .api.bluetooth import bluetooth_bp
