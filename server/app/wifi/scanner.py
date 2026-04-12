@@ -22,11 +22,11 @@ from app.models.base import db
 from app.models.wifi import WifiDevice, WifiHistory
 
 from .metadata import (
-    DEFAULT_REF_RSSI,
     freq_to_band,
     oui_vendor,
     parse_nmcli_line,
     quality_to_dbm,
+    ref_rssi_for_freq,
 )
 
 _SPEED_STATIONARY = 0.05
@@ -41,8 +41,8 @@ class WifiScanner(BaseScanner):
 
     # ── BaseScanner interface ─────────────────────────────────────────────────
 
-    def _ref_rssi(self, _snapshot: dict) -> float:
-        return DEFAULT_REF_RSSI
+    def _ref_rssi(self, snapshot: dict) -> float:
+        return ref_rssi_for_freq(snapshot.get("frequency_mhz", 0))
 
     def _do_scan(
         self, timeout: float, n: float
@@ -87,8 +87,9 @@ class WifiScanner(BaseScanner):
                 continue
 
             rssi = quality_to_dbm(quality)
-            # Distance at scan time uses raw RSSI — smoothing happens in _build_results.
-            dist = round(10 ** ((DEFAULT_REF_RSSI - rssi) / (10 * n)), 2) if rssi < 0 else None
+            ref  = ref_rssi_for_freq(freq_mhz)
+            # Distance at scan time uses raw RSSI — smoothing happens in get_devices().
+            dist = round(10 ** ((ref - rssi) / (10 * n)), 2) if rssi < 0 else None
 
             snapshot = {
                 "bssid":         bssid,
@@ -131,10 +132,20 @@ class WifiScanner(BaseScanner):
                         "vendor":        dev.vendor,
                     },
                     history=[
-                        {"time": r.recorded_at, "rssi": r.rssi, "distance": r.distance}
+                        {
+                            "time":              r.recorded_at,
+                            "rssi":              r.rssi,
+                            "distance":          r.distance,
+                            "smoothed_rssi":     r.smoothed_rssi,
+                            "smoothed_distance": None,  # recomputed on first _build_results
+                            "is_outlier":        bool(r.is_outlier),
+                        }
                         for r in rows
                     ],
                     last_seen=dev.last_seen_at or 0.0,
+                    smoothed_speed=dev.smoothed_speed,
+                    movement_state=dev.movement_state,
+                    movement_since=dev.movement_since,
                 )
         except Exception:
             pass  # DB not ready — start with empty store
@@ -145,6 +156,8 @@ class WifiScanner(BaseScanner):
         snapshot: dict,
         rssi: float,
         distance: float | None,
+        smoothed_rssi: float | None,
+        is_outlier: bool,
         ts: float,
     ) -> None:
         """Upsert the WiFi device row and insert one history entry (no commit)."""
@@ -171,13 +184,37 @@ class WifiScanner(BaseScanner):
                 existing.vendor = snapshot["vendor"]
                 existing.last_seen_at = ts
 
-            history_row = WifiHistory(bssid=key, rssi=rssi, distance=distance, recorded_at=ts)
+            history_row = WifiHistory(
+                bssid=key,
+                rssi=rssi,
+                distance=distance,
+                smoothed_rssi=smoothed_rssi,
+                is_outlier=is_outlier,
+                recorded_at=ts,
+            )
             db.session.add(history_row)
             db.session.flush()  # assign ID before trim query
 
             self._trim_history(key)
         except Exception:
             pass  # non-fatal; in-memory store is authoritative
+
+    def _persist_movement_state(
+        self,
+        key: str,
+        smoothed_speed: float | None,
+        movement_state: str | None,
+        movement_since: float | None,
+    ) -> None:
+        """Update the WiFi device row's movement columns (no commit)."""
+        try:
+            existing = db.session.get(WifiDevice, key)
+            if existing is not None:
+                existing.smoothed_speed  = smoothed_speed
+                existing.movement_state  = movement_state
+                existing.movement_since  = movement_since
+        except Exception:
+            pass
 
     def _clear_db(self) -> None:
         """Delete all WiFi records and commit."""

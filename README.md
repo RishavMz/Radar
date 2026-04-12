@@ -1,6 +1,6 @@
 # Radar
 
-Radar is a BLE + WiFi scanner with a Flask REST API and a unified web dashboard. It discovers nearby Bluetooth and WiFi devices, estimates distances using a log-distance path-loss model, identifies vendors, and classifies movement. All history is persisted to SQLite.
+Radar is a BLE + WiFi scanner with a Flask REST API and a unified web dashboard. It discovers nearby Bluetooth and WiFi devices, estimates distances using a log-distance path-loss model with EWMA-smoothed RSSI, identifies vendors, and classifies movement with hysteresis. All history is persisted to SQLite.
 
 ## Structure
 

@@ -1,7 +1,7 @@
 import time
 from typing import Optional
 
-from sqlalchemy import Float, ForeignKey, Index, Integer, String
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import db
@@ -21,6 +21,9 @@ class WifiDevice(db.Model):
     vendor: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_seen_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
+    smoothed_speed: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    movement_state: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    movement_since: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     history: Mapped[list["WifiHistory"]] = relationship(
         back_populates="device",
@@ -40,6 +43,8 @@ class WifiHistory(db.Model):
     )
     rssi: Mapped[int] = mapped_column(Integer)
     distance: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    smoothed_rssi: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    is_outlier: Mapped[bool] = mapped_column(Boolean, default=False)
     recorded_at: Mapped[float] = mapped_column(Float, default=time.time)
 
     device: Mapped["WifiDevice"] = relationship(back_populates="history")

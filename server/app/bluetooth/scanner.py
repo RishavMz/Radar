@@ -114,10 +114,20 @@ class BluetoothScanner(BaseScanner):
                         "service_data":      dev.service_data or {},
                     },
                     history=[
-                        {"time": r.recorded_at, "rssi": r.rssi, "distance": r.distance}
+                        {
+                            "time":              r.recorded_at,
+                            "rssi":              r.rssi,
+                            "distance":          r.distance,
+                            "smoothed_rssi":     r.smoothed_rssi,
+                            "smoothed_distance": None,  # recomputed on first _build_results
+                            "is_outlier":        bool(r.is_outlier),
+                        }
                         for r in rows
                     ],
                     last_seen=dev.last_seen_at or 0.0,
+                    smoothed_speed=dev.smoothed_speed,
+                    movement_state=dev.movement_state,
+                    movement_since=dev.movement_since,
                 )
         except Exception:
             pass  # DB not ready — start with empty store
@@ -128,6 +138,8 @@ class BluetoothScanner(BaseScanner):
         snapshot: dict,
         rssi: float,
         distance: float | None,
+        smoothed_rssi: float | None,
+        is_outlier: bool,
         ts: float,
     ) -> None:
         """Upsert the BLE device row and insert one history entry (no commit)."""
@@ -162,13 +174,37 @@ class BluetoothScanner(BaseScanner):
                 existing.service_data = snapshot["service_data"]
                 existing.last_seen_at = ts
 
-            history_row = BluetoothHistory(address=key, rssi=rssi, distance=distance, recorded_at=ts)
+            history_row = BluetoothHistory(
+                address=key,
+                rssi=rssi,
+                distance=distance,
+                smoothed_rssi=smoothed_rssi,
+                is_outlier=is_outlier,
+                recorded_at=ts,
+            )
             db.session.add(history_row)
             db.session.flush()  # assign ID before trim query
 
             self._trim_history(key)
         except Exception:
             pass  # non-fatal; in-memory store is authoritative
+
+    def _persist_movement_state(
+        self,
+        key: str,
+        smoothed_speed: float | None,
+        movement_state: str | None,
+        movement_since: float | None,
+    ) -> None:
+        """Update the BLE device row's movement columns (no commit)."""
+        try:
+            existing = db.session.get(BluetoothDevice, key)
+            if existing is not None:
+                existing.smoothed_speed  = smoothed_speed
+                existing.movement_state  = movement_state
+                existing.movement_since  = movement_since
+        except Exception:
+            pass
 
     def _clear_db(self) -> None:
         """Delete all BLE records and commit."""
