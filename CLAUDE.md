@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **Do not commit changes to git unless explicitly instructed by the user.** Always propose changes and wait for confirmation before running `git commit` or `git push`.
 - **Update CLAUDE.md and README.md on every major change.** Keep both files accurate and concise — remove stale content rather than appending to it. Do not let either file bloat with outdated information.
+- **Update `resources/ALGORITHM.md` whenever any of the following change:** distance estimation formula or parameters, RSSI smoothing strategy, outlier detection logic, movement classification (thresholds, EWMA constants, hysteresis), data storage schema, scan flow (commit strategy, store lifecycle), or angular/radar rendering logic. The file must reflect the actual code — never let it drift stale.
 
 ## Project
 
@@ -49,6 +50,8 @@ Radar/
 │   ├── .env                       # Local deployment config (gitignored)
 │   ├── .env.example               # Template for .env
 │   └── run.py                     # Entrypoint: loads .env, starts Flask dev server
+├── resources/
+│   └── ALGORITHM.md               # Algorithm deep-dive: distance, EWMA, movement, storage
 ├── .gitignore                     # Excludes /db/*.db, /db/*.db-wal, /db/*.db-shm
 └── README.md
 ```
